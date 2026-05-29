@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Runtime database (auto-created and seeded on first run)
+assets.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+
+# Local Claude Code settings (machine-specific)
+.claude/settings.local.json
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
