@@ -153,6 +153,17 @@
     td.col-date   { font-family: var(--mono); font-size: 11px; color: var(--text-dim); white-space: nowrap; }
     td.col-notes  { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-dim); font-size: 12px; }
 
+    .jira-link       { text-decoration: none; }
+    .jira-link:hover { text-decoration: underline; }
+
+    /* Read-only field display (e.g. repair tickets in the edit modal) */
+    .readonly-field {
+      padding: 9px 11px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      font-family: var(--mono); font-size: 12px; min-height: 38px;
+      display: flex; align-items: center; flex-wrap: wrap; gap: 2px;
+    }
+
     /* Status badges */
     .badge {
       display: inline-flex; align-items: center; gap: 5px;
@@ -347,6 +358,7 @@
           <th>Serial #</th>
           <th>Assigned To</th>
           <th>Status</th>
+          <th>Repair Ticket</th>
           <th>Purchase Date</th>
           <th>Notes</th>
           <th></th>
@@ -448,6 +460,12 @@
         <label>Notes</label>
         <textarea id="f-notes" placeholder="Optional notes…"></textarea>
       </div>
+
+      <!-- Repair tickets (read-only; populated when editing an asset with tickets) -->
+      <div class="field" id="f-repair-tickets-wrap" style="display:none">
+        <label>Repair Tickets</label>
+        <div id="f-repair-tickets" class="readonly-field"></div>
+      </div>
     </div>
 
     <div class="modal-footer">
@@ -466,9 +484,13 @@
   let activeFilter = "";
   let searchTerm   = "";
   let editingId    = null;
+  let jiraBaseUrl  = ""; // set from /config; enables ticket deep-links when present
 
   // ── Boot ───────────────────────────────────────────────
-  fetchAssets();
+  (async function boot() {
+    try { jiraBaseUrl = (await api("GET", "/config")).jiraBaseUrl || ""; } catch { /* links stay as plain text */ }
+    fetchAssets();
+  })();
 
   // ── API ────────────────────────────────────────────────
 
@@ -519,6 +541,7 @@
         <td class="col-serial" title="${esc(a.serial_number)}">${a.serial_number ? esc(a.serial_number) : dim("—")}</td>
         <td>${a.assigned_to   ? esc(a.assigned_to)   : dim("—")}</td>
         <td>${badge(a.status)}</td>
+        <td class="col-mono">${jiraCell(a)}</td>
         <td class="col-date">${a.purchase_date ? esc(a.purchase_date) : dim("—")}</td>
         <td class="col-notes" title="${esc(a.notes)}">${a.notes ? esc(a.notes) : dim("—")}</td>
         <td>
@@ -541,6 +564,49 @@
       "Retired":          "badge-retired",
     }[status] || "badge-retired";
     return `<span class="badge ${cls}">${status}</span>`;
+  }
+
+  // Repair-ticket cell: the open ticket (yellow) takes priority; otherwise the
+  // most recent past ticket (dimmed). "+N" flags older tickets, full list on hover.
+  function jiraCell(a) {
+    const open    = a.jira_issue_key || "";
+    const history = (a.repair_ticket_history || "").split(",").map(s => s.trim()).filter(Boolean);
+    if (!open && !history.length) return dim("—");
+
+    const title = history.length ? `Repair tickets: ${history.join(", ")}` : "";
+    const extra = history.length > 1 ? ` <span style="color:var(--text-dim)">+${history.length - 1}</span>` : "";
+    const key   = open || history[history.length - 1];
+    const label = ticketLink(key, open ? "var(--yellow)" : "var(--text-dim)");
+    return `<span title="${esc(title)}">${label}${extra}</span>`;
+  }
+
+  // Build a single ticket reference (clickable when a Jira base URL is known).
+  function ticketLink(key, color) {
+    return jiraBaseUrl
+      ? `<a class="jira-link" href="${esc(jiraBaseUrl)}/browse/${encodeURIComponent(key)}" target="_blank" rel="noopener" style="color:${color}">${esc(key)}</a>`
+      : `<span style="color:${color}">${esc(key)}</span>`;
+  }
+
+  // Populate the read-only "Repair Tickets" block in the edit modal. Lists every
+  // ticket (history + any open one), highlights the open ticket, hides if none.
+  function renderRepairTickets(a) {
+    const wrap = document.getElementById("f-repair-tickets-wrap");
+    const box  = document.getElementById("f-repair-tickets");
+
+    const open = a.jira_issue_key || "";
+    const all  = (a.repair_ticket_history || "").split(",").map(s => s.trim()).filter(Boolean);
+    if (open && !all.includes(open)) all.unshift(open); // safety: surface an open ticket not yet in history
+
+    if (!all.length) { wrap.style.display = "none"; return; }
+
+    box.innerHTML = all
+      .map(key => {
+        const isOpen = key === open;
+        const link   = ticketLink(key, isOpen ? "var(--yellow)" : "var(--text-dim)");
+        return isOpen ? `${link} <span style="color:var(--text-dim);font-size:10px">(open)</span>` : link;
+      })
+      .join('<span style="color:var(--muted)"> · </span>');
+    wrap.style.display = "flex";
   }
 
   async function updateCounts() {
@@ -585,6 +651,7 @@
     document.getElementById("modal-title").textContent    = "Add Asset";
     document.getElementById("modal-subtitle").textContent = "";
     clearForm();
+    document.getElementById("f-repair-tickets-wrap").style.display = "none"; // new assets have no tickets
     showOverlay();
   }
 
@@ -595,6 +662,7 @@
     document.getElementById("modal-title").textContent    = "Edit Asset";
     document.getElementById("modal-subtitle").textContent = `ID #${id}`;
     populateForm(a);
+    renderRepairTickets(a);
     showOverlay();
   }
 

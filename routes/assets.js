@@ -10,6 +10,7 @@
 const express  = require("express");
 const { queryAll, queryOne, run, runInsert } = require("../db");
 const { VALID_STATUSES, validateAsset }      = require("../validation");
+const { syncRepairIssue }                    = require("../jira");
 
 const router = express.Router();
 
@@ -89,13 +90,16 @@ router.post("/", (req, res) => {
 
   const created = queryOne("SELECT * FROM assets WHERE id = ?", [id]);
   res.status(201).json(created);
+
+  syncRepairIssue(created); // best-effort; no-op unless status is "In Repair"
 });
 
 // ─── PUT /assets/:id ──────────────────────────────────────────────────────────
 
 router.put("/:id", (req, res) => {
   const id = Number(req.params.id);
-  if (!queryOne("SELECT id FROM assets WHERE id = ?", [id])) {
+  const existing = queryOne("SELECT * FROM assets WHERE id = ?", [id]);
+  if (!existing) {
     return res.status(404).json({ error: "Asset not found." });
   }
 
@@ -110,7 +114,15 @@ router.put("/:id", (req, res) => {
     [name, category, company, serial_number, assigned_to, status, purchase_date, notes, id]
   );
 
-  res.json(queryOne("SELECT * FROM assets WHERE id = ?", [id]));
+  // Entering repair: remember the status to restore once the Jira ticket closes.
+  if (existing.status !== "In Repair" && status === "In Repair") {
+    run("UPDATE assets SET status_before_repair = ? WHERE id = ?", [existing.status, id]);
+  }
+
+  const updated = queryOne("SELECT * FROM assets WHERE id = ?", [id]);
+  res.json(updated);
+
+  syncRepairIssue(updated); // best-effort; no-op unless status is "In Repair"
 });
 
 // ─── DELETE /assets/:id ───────────────────────────────────────────────────────

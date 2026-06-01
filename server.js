@@ -12,6 +12,7 @@ const express     = require("express");
 const path        = require("path");
 const { initDb }  = require("./db");
 const assetsRoute = require("./routes/assets");
+const { startRepairPolling, JIRA_BASE_URL } = require("./jira");
 
 const app  = express();
 const PORT = process.env.PORT || 3000;
@@ -24,6 +25,11 @@ app.use(express.static(path.join(__dirname, "public")));
 // ─── API routes ───────────────────────────────────────────────────────────────
 
 app.use("/assets", assetsRoute);
+
+// Frontend config — exposes the Jira site URL so the UI can build browse links.
+app.get("/config", (req, res) => {
+  res.json({ jiraBaseUrl: JIRA_BASE_URL });
+});
 
 // ─── Global error handler ─────────────────────────────────────────────────────
 
@@ -38,6 +44,7 @@ initDb()
   .then(() => {
     app.listen(PORT, () => {
       console.log(`\n  ✓ Asset Manager  →  http://localhost:${PORT}\n`);
+      startRepairPolling(); // watches open Jira repair tickets for closure (no-op if disabled)
     });
   })
   .catch(err => {

@@ -11,6 +11,8 @@ npm-debug.log*
 # Environment / secrets
 .env
 .env.*
+# keep the (secret-free) template in the repo
+!.env.example
 
 # Local Claude Code settings (machine-specific)
 .claude/settings.local.json

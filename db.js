@@ -41,6 +41,7 @@ async function initDb() {
   }
 
   createSchema();
+  migrate();
   seedIfEmpty();
   persist(); // write initial file to disk
   return db;
@@ -106,6 +107,24 @@ function createSchema() {
       created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
     )
   `);
+}
+
+/**
+ * Apply additive schema changes to existing databases.
+ * Safe to run on every boot — only adds what's missing.
+ */
+function migrate() {
+  const cols = queryAll("PRAGMA table_info(assets)").map(c => c.name);
+  const addColumn = (name) => {
+    if (!cols.includes(name)) {
+      db.run(`ALTER TABLE assets ADD COLUMN ${name} TEXT NOT NULL DEFAULT ''`);
+      console.log(`  ✓ Migrated: added assets.${name}`);
+    }
+  };
+
+  addColumn("jira_issue_key");        // currently-open repair ticket, if any
+  addColumn("status_before_repair");  // status to restore when that ticket closes
+  addColumn("repair_ticket_history"); // comma-separated list of every repair ticket
 }
 
 /** Populate sample rows only when the table is brand new. */
