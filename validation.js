@@ -5,7 +5,7 @@
 const VALID_STATUSES = ["Available", "Assigned", "In Repair", "Retired", "Ordered", "Pending Approval"];
 
 const VALID_CATEGORIES = [
-  "Laptop", "Monitor", "Phone", "Tablet", "Printer",
+  "Laptop", "Desktop", "Monitor", "Phone", "Tablet", "Printer",
   "Server", "Keyboard", "Mouse", "Other",
 ];
 
