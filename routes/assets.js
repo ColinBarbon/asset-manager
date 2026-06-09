@@ -11,8 +11,20 @@ const express  = require("express");
 const { queryAll, queryOne, run, runInsert } = require("../db");
 const { VALID_STATUSES, validateAsset }      = require("../validation");
 const { syncRepairIssue }                    = require("../jira");
+const { toCsv, parseCsv }                    = require("../csv");
 
 const router = express.Router();
+
+// Full row schema for CSV export. Import only consumes the editable fields below.
+const CSV_COLUMNS = [
+  "id", "name", "category", "company", "serial_number", "assigned_to",
+  "status", "purchase_date", "notes", "jira_issue_key",
+  "status_before_repair", "repair_ticket_history", "created_at",
+];
+
+// Fields an imported row may set; everything else (id, created_at, Jira state)
+// is managed by the server and ignored on import.
+const IMPORTABLE = ["name", "category", "company", "serial_number", "assigned_to", "status", "purchase_date", "notes"];
 
 // ─── Helper: extract clean asset fields from a request body ──────────────────
 
@@ -73,6 +85,57 @@ router.get("/stats", (req, res) => {
     byStatus[row.status] = row.count;
   }
   res.json({ total, byStatus });
+});
+
+// ─── GET /assets/export.csv ────────────────────────────────────────────────────
+// Download every asset as a CSV file (full row schema).
+
+router.get("/export.csv", (req, res) => {
+  const rows = queryAll("SELECT * FROM assets ORDER BY id");
+  const csv = toCsv(rows, CSV_COLUMNS);
+  const date = new Date().toISOString().slice(0, 10);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", `attachment; filename="assets-${date}.csv"`);
+  res.send(csv);
+});
+
+// ─── POST /assets/import ───────────────────────────────────────────────────────
+// Append mode: every valid CSV row becomes a new asset. Columns are matched by
+// header name (case-insensitive); unknown columns (id, created_at, …) are
+// ignored. Returns counts plus the first few row-level validation errors.
+
+router.post("/import", express.text({ type: "*/*", limit: "5mb" }), (req, res) => {
+  const records = parseCsv(req.body || "");
+  if (!records.length) {
+    return res.status(400).json({ error: "CSV contained no data rows." });
+  }
+
+  let inserted = 0;
+  const errors = [];
+
+  records.forEach((rec, idx) => {
+    // Case-insensitive header lookup, so column order/casing don't matter.
+    const lookup = {};
+    for (const key of Object.keys(rec)) lookup[key.trim().toLowerCase()] = rec[key];
+
+    const body = {};
+    for (const field of IMPORTABLE) body[field] = String(lookup[field] ?? "").trim();
+
+    const rowErrors = validateAsset(body);
+    if (rowErrors.length) {
+      errors.push(`Row ${idx + 2}: ${rowErrors.join(" ")}`); // +2: header is line 1
+      return;
+    }
+
+    runInsert(
+      `INSERT INTO assets (name, category, company, serial_number, assigned_to, status, purchase_date, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [body.name, body.category, body.company, body.serial_number, body.assigned_to, body.status, body.purchase_date, body.notes]
+    );
+    inserted++;
+  });
+
+  res.json({ inserted, failed: errors.length, errors: errors.slice(0, 20) });
 });
 
 // ─── POST /assets ─────────────────────────────────────────────────────────────

@@ -65,6 +65,8 @@ npm run dev
 | POST   | `/assets`     | Create a new asset                                   |
 | PUT    | `/assets/:id` | Update an existing asset                             |
 | DELETE | `/assets/:id` | Delete an asset                                      |
+| GET    | `/assets/export.csv` | Download all assets as a CSV file             |
+| POST   | `/assets/import` | Import assets from CSV (append mode)             |
 | GET    | `/config`     | Frontend config (Jira base URL for ticket deep-links) |
 
 ### Query Parameters (GET)
@@ -105,6 +107,26 @@ curl -X POST http://localhost:3000/assets \
     "notes": "Company standard issue"
   }'
 ```
+
+---
+
+## CSV import / export
+
+Use the **Export CSV** / **Import CSV** buttons in the sidebar (or the endpoints
+directly).
+
+- **Export** (`GET /assets/export.csv`) downloads every asset as a CSV with the
+  full row schema (id, name, category, …, created_at).
+- **Import** (`POST /assets/import`, body = raw CSV text) runs in **append
+  mode**: each row is validated and inserted as a *new* asset — existing data is
+  never modified. Columns are matched by header name (case-insensitive), and any
+  columns the server manages (`id`, `created_at`, Jira fields) are ignored, so an
+  exported file can be re-imported as-is. The response reports how many rows were
+  inserted vs. skipped, with per-row validation errors for the skipped ones.
+
+Minimum columns for import: `name`, `category`, `status` (the required fields);
+`company`, `serial_number`, `assigned_to`, `purchase_date` and `notes` are
+optional.
 
 ---
 
