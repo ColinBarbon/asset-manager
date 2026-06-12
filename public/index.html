@@ -51,6 +51,16 @@
     .sidebar-brand {
       padding: 20px 20px 16px;
       border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .brand-logo {
+      width: 40px;
+      height: 40px;
+      flex-shrink: 0;
+      border-radius: var(--radius);
+      object-fit: contain;
     }
     .sidebar-brand h1 {
       font-family: var(--mono);
@@ -149,6 +159,12 @@
       border-bottom: 1px solid var(--border);
       white-space: nowrap; position: sticky; top: 0; z-index: 1;
     }
+    thead th.th-drag { cursor: grab; user-select: none; }
+    thead th.th-drag:hover { color: var(--text); }
+    thead th.th-dragging { opacity: 0.4; cursor: grabbing; }
+    thead th.th-dropzone { box-shadow: inset 2px 0 0 0 var(--accent); color: var(--text); }
+    thead th.th-sorted { color: var(--text); }
+    .sort-ind { margin-left: 5px; font-size: 8px; color: var(--accent); vertical-align: middle; }
     tbody tr { border-bottom: 1px solid var(--border); transition: background 0.1s; }
     tbody tr:hover { background: var(--surface); }
     tbody tr:last-child { border-bottom: none; }
@@ -293,8 +309,11 @@
 <!-- ── Sidebar ────────────────────────────────────────────────────── -->
 <aside class="sidebar">
   <div class="sidebar-brand">
-    <h1>AssetMgr</h1>
-    <p>inventory system</p>
+    <img class="brand-logo" src="/CHBGroupLogo.png" alt="CHB Group">
+    <div class="brand-text">
+      <h1>AssetMgr</h1>
+      <p>inventory system</p>
+    </div>
   </div>
 
   <div class="sidebar-stats">
@@ -364,19 +383,7 @@
   <div class="table-wrap">
     <table>
       <thead>
-        <tr>
-          <th>#</th>
-          <th>Name</th>
-          <th>Category</th>
-          <th>Company</th>
-          <th>Serial #</th>
-          <th>Assigned To</th>
-          <th>Status</th>
-          <th>Repair Ticket</th>
-          <th>Purchase Date</th>
-          <th>Notes</th>
-          <th></th>
-        </tr>
+        <tr id="thead-row"></tr>
       </thead>
       <tbody id="asset-tbody"></tbody>
     </table>
@@ -506,6 +513,51 @@
   let editingId    = null;
   let jiraBaseUrl  = ""; // set from /config; enables ticket deep-links when present
 
+  // ── Columns ────────────────────────────────────────────
+  // Single source of truth for the asset table. Header label + per-row cell
+  // renderer live together so the table is driven entirely by `columnOrder`,
+  // which the user can rearrange by dragging headers (persisted to localStorage).
+  // The actions column is pinned to the end and is not part of this model.
+  const COLUMNS = [
+    { key: "id",            label: "#",             cell: a => `<td class="col-id">${a.id}</td>` },
+    { key: "name",          label: "Name",          cell: a => `<td class="col-name">${esc(a.name)}</td>` },
+    { key: "category",      label: "Category",      cell: a => `<td class="col-mono">${esc(a.category)}</td>` },
+    { key: "company",       label: "Company",       cell: a => `<td>${a.company ? esc(a.company) : dim("—")}</td>` },
+    { key: "serial_number", label: "Serial #",      cell: a => `<td class="col-serial" title="${esc(a.serial_number)}">${a.serial_number ? esc(a.serial_number) : dim("—")}</td>` },
+    { key: "assigned_to",   label: "Assigned To",   cell: a => `<td>${a.assigned_to ? esc(a.assigned_to) : dim("—")}</td>` },
+    { key: "status",        label: "Status",        cell: a => `<td>${badge(a.status)}</td>` },
+    { key: "repair_ticket", label: "Repair Ticket", cell: a => `<td class="col-mono">${jiraCell(a)}</td>`,
+      // No `repair_ticket` field exists on the asset — sort by the visible ticket
+      // key (the open one, else the most recent in history).
+      sortValue: a => {
+        const hist = (a.repair_ticket_history || "").split(",").map(s => s.trim()).filter(Boolean);
+        return a.jira_issue_key || hist[hist.length - 1] || "";
+      } },
+    { key: "purchase_date", label: "Purchase Date", cell: a => `<td class="col-date">${a.purchase_date ? esc(a.purchase_date) : dim("—")}</td>` },
+    { key: "notes",         label: "Notes",         cell: a => `<td class="col-notes" title="${esc(a.notes)}">${a.notes ? esc(a.notes) : dim("—")}</td>` },
+  ];
+  const COL_ORDER_KEY = "assetColumnOrder";
+
+  // Ordered list of column keys. Starts from any saved order, drops keys that no
+  // longer exist, and appends any columns added since the order was saved — so a
+  // new column always shows up even for users with a stale saved order.
+  let columnOrder = loadColumnOrder();
+
+  function loadColumnOrder() {
+    const known = COLUMNS.map(c => c.key);
+    let saved = [];
+    try { saved = JSON.parse(localStorage.getItem(COL_ORDER_KEY)) || []; } catch { /* ignore */ }
+    const ordered = saved.filter(k => known.includes(k));
+    for (const k of known) if (!ordered.includes(k)) ordered.push(k);
+    return ordered;
+  }
+
+  function saveColumnOrder() {
+    try { localStorage.setItem(COL_ORDER_KEY, JSON.stringify(columnOrder)); } catch { /* ignore */ }
+  }
+
+  const colByKey = key => COLUMNS.find(c => c.key === key);
+
   // ── Boot ───────────────────────────────────────────────
   (async function boot() {
     try {
@@ -513,6 +565,7 @@
       jiraBaseUrl = cfg.jiraBaseUrl || "";
       if (cfg.authEnabled) document.getElementById("logout-btn").style.display = "";
     } catch { /* links stay as plain text */ }
+    renderHeader();
     fetchAssets();
   })();
 
@@ -548,6 +601,23 @@
 
   // ── Render ─────────────────────────────────────────────
 
+  // Draw the header row from `columnOrder`. Each data header is draggable so the
+  // user can rearrange columns; the trailing actions header stays pinned.
+  function renderHeader() {
+    const row = document.getElementById("thead-row");
+    const headers = columnOrder.map(key => {
+      const col    = colByKey(key);
+      const sorted = sortKey === col.key;
+      const arrow  = sorted ? `<span class="sort-ind">${sortDir === "asc" ? "▲" : "▼"}</span>` : "";
+      return `<th class="th-drag${sorted ? " th-sorted" : ""}" draggable="true" data-key="${col.key}"
+                  onclick="colHeaderClick(event)"
+                  ondragstart="colDragStart(event)" ondragend="colDragEnd(event)"
+                  ondragover="colDragOver(event)" ondragleave="colDragLeave(event)"
+                  ondrop="colDrop(event)" title="Click to sort · drag to reorder">${esc(col.label)}${arrow}</th>`;
+    }).join("");
+    row.innerHTML = headers + "<th></th>"; // pinned actions column
+  }
+
   function renderTable() {
     const tbody = document.getElementById("asset-tbody");
     const empty = document.getElementById("empty-state");
@@ -562,18 +632,9 @@
     empty.style.display = "none";
     count.textContent   = `${assets.length} asset${assets.length !== 1 ? "s" : ""}`;
 
-    tbody.innerHTML = assets.map(a => `
+    tbody.innerHTML = sortedAssets().map(a => `
       <tr>
-        <td class="col-id">${a.id}</td>
-        <td class="col-name">${esc(a.name)}</td>
-        <td class="col-mono">${esc(a.category)}</td>
-        <td>${a.company       ? esc(a.company)       : dim("—")}</td>
-        <td class="col-serial" title="${esc(a.serial_number)}">${a.serial_number ? esc(a.serial_number) : dim("—")}</td>
-        <td>${a.assigned_to   ? esc(a.assigned_to)   : dim("—")}</td>
-        <td>${badge(a.status)}</td>
-        <td class="col-mono">${jiraCell(a)}</td>
-        <td class="col-date">${a.purchase_date ? esc(a.purchase_date) : dim("—")}</td>
-        <td class="col-notes" title="${esc(a.notes)}">${a.notes ? esc(a.notes) : dim("—")}</td>
+        ${columnOrder.map(key => colByKey(key).cell(a)).join("")}
         <td>
           <div class="actions">
             <button class="btn-icon"     onclick="openEditModal(${a.id})">edit</button>
@@ -582,6 +643,80 @@
         </td>
       </tr>
     `).join("");
+  }
+
+  // ── Column sorting ─────────────────────────────────────
+  let sortKey = null;       // null → server order (by id)
+  let sortDir = "asc";      // "asc" | "desc"
+
+  // Return assets sorted by the active column. Blank values always sink to the
+  // bottom regardless of direction; numbers compare numerically, everything else
+  // as locale-aware strings (so "2" < "10" and case is ignored).
+  function sortedAssets() {
+    if (!sortKey) return assets;
+    const col = colByKey(sortKey);
+    const valOf = col.sortValue || (a => a[sortKey]);
+    const dir = sortDir === "asc" ? 1 : -1;
+    const blank = v => v === null || v === undefined || v === "";
+    return [...assets].sort((a, b) => {
+      const x = valOf(a), y = valOf(b);
+      if (blank(x) && blank(y)) return 0;
+      if (blank(x)) return 1;
+      if (blank(y)) return -1;
+      if (typeof x === "number" && typeof y === "number") return (x - y) * dir;
+      return String(x).localeCompare(String(y), undefined, { numeric: true, sensitivity: "base" }) * dir;
+    });
+  }
+
+  // Click a header to sort by it; click again to flip direction. Suppressed right
+  // after a drag (a drop can emit a trailing click) — see colDragStart/End.
+  function colHeaderClick(e) {
+    if (justDragged) return;
+    const key = e.currentTarget.dataset.key;
+    if (sortKey === key) sortDir = sortDir === "asc" ? "desc" : "asc";
+    else { sortKey = key; sortDir = "asc"; }
+    renderHeader();
+    renderTable();
+  }
+
+  // ── Column drag-and-drop reordering ────────────────────
+  let dragColKey  = null;
+  let justDragged = false; // guards colHeaderClick against the click that trails a drop
+
+  function colDragStart(e) {
+    dragColKey  = e.currentTarget.dataset.key;
+    justDragged = true;
+    e.dataTransfer.effectAllowed = "move";
+    e.currentTarget.classList.add("th-dragging");
+  }
+  function colDragEnd(e) {
+    e.currentTarget.classList.remove("th-dragging");
+    document.querySelectorAll(".th-dropzone").forEach(th => th.classList.remove("th-dropzone"));
+    dragColKey = null;
+    // Clear on the next tick — after any trailing click has been dispatched and
+    // skipped — so the following genuine click sorts normally.
+    setTimeout(() => { justDragged = false; }, 0);
+  }
+  function colDragOver(e) {
+    if (dragColKey === null) return;
+    e.preventDefault(); // allow drop
+    e.dataTransfer.dropEffect = "move";
+    if (e.currentTarget.dataset.key !== dragColKey) e.currentTarget.classList.add("th-dropzone");
+  }
+  function colDragLeave(e) {
+    e.currentTarget.classList.remove("th-dropzone");
+  }
+  function colDrop(e) {
+    e.preventDefault();
+    const targetKey = e.currentTarget.dataset.key;
+    if (dragColKey === null || targetKey === dragColKey) return;
+    const from = columnOrder.indexOf(dragColKey);
+    const to   = columnOrder.indexOf(targetKey);
+    columnOrder.splice(from, 1);
+    columnOrder.splice(to, 0, dragColKey);
+    saveColumnOrder();
+    renderHeader();
+    renderTable();
   }
 
   function badge(status) {
