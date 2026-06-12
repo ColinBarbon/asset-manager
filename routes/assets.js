@@ -8,12 +8,45 @@
  */
 
 const express  = require("express");
-const { queryAll, queryOne, run, runInsert } = require("../db");
+const { queryAll, queryOne, run, runInsert, recordHistory } = require("../db");
 const { VALID_STATUSES, validateAsset }      = require("../validation");
 const { syncRepairIssue }                    = require("../jira");
 const { toCsv, parseCsv }                    = require("../csv");
 
 const router = express.Router();
+
+// Editable fields, in insert order — used for snapshots and diffs in the audit trail.
+const EDITABLE = ["name", "category", "company", "serial_number", "assigned_to", "status", "purchase_date", "notes"];
+
+/**
+ * Is this serial number already used by a different asset? Empty serials are
+ * allowed and never considered duplicates (many assets legitimately lack one).
+ */
+function serialTaken(serial, excludeId = -1) {
+  if (!serial) return false;
+  return Boolean(queryOne(
+    "SELECT id FROM assets WHERE serial_number = ? AND id <> ?",
+    [serial, excludeId]
+  ));
+}
+
+/** Snapshot just the editable fields of a row, for the audit trail. */
+function snapshot(row) {
+  const out = {};
+  for (const f of EDITABLE) out[f] = row[f];
+  return out;
+}
+
+/** Field-level diff between two rows: { field: { from, to } } for changed fields. */
+function diffFields(before, after) {
+  const changes = {};
+  for (const f of EDITABLE) {
+    if (String(before[f] ?? "") !== String(after[f] ?? "")) {
+      changes[f] = { from: before[f], to: after[f] };
+    }
+  }
+  return changes;
+}
 
 // Full row schema for CSV export. Import only consumes the editable fields below.
 const CSV_COLUMNS = [
@@ -104,7 +137,7 @@ router.get("/export.csv", (req, res) => {
 // header name (case-insensitive); unknown columns (id, created_at, …) are
 // ignored. Returns counts plus the first few row-level validation errors.
 
-router.post("/import", express.text({ type: "*/*", limit: "5mb" }), (req, res) => {
+router.post("/import", express.text({ type: ["text/csv", "text/plain", "application/csv"], limit: "5mb" }), (req, res) => {
   const records = parseCsv(req.body || "");
   if (!records.length) {
     return res.status(400).json({ error: "CSV contained no data rows." });
@@ -126,12 +159,17 @@ router.post("/import", express.text({ type: "*/*", limit: "5mb" }), (req, res) =
       errors.push(`Row ${idx + 2}: ${rowErrors.join(" ")}`); // +2: header is line 1
       return;
     }
+    if (serialTaken(body.serial_number)) {
+      errors.push(`Row ${idx + 2}: serial number "${body.serial_number}" already exists.`);
+      return;
+    }
 
-    runInsert(
+    const id = runInsert(
       `INSERT INTO assets (name, category, company, serial_number, assigned_to, status, purchase_date, notes)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [body.name, body.category, body.company, body.serial_number, body.assigned_to, body.status, body.purchase_date, body.notes]
     );
+    recordHistory(id, "import", snapshot(body));
     inserted++;
   });
 
@@ -145,6 +183,11 @@ router.post("/", (req, res) => {
   if (errors.length) return res.status(400).json({ errors });
 
   const fields = assetFromBody(req.body);
+  const serial = fields[3];
+  if (serialTaken(serial)) {
+    return res.status(409).json({ error: `Serial number "${serial}" is already in use.` });
+  }
+
   const id = runInsert(
     `INSERT INTO assets (name, category, company, serial_number, assigned_to, status, purchase_date, notes)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -152,6 +195,7 @@ router.post("/", (req, res) => {
   );
 
   const created = queryOne("SELECT * FROM assets WHERE id = ?", [id]);
+  recordHistory(id, "create", snapshot(created));
   res.status(201).json(created);
 
   syncRepairIssue(created); // best-effort; no-op unless status is "In Repair"
@@ -170,6 +214,10 @@ router.put("/:id", (req, res) => {
   if (errors.length) return res.status(400).json({ errors });
 
   const [name, category, company, serial_number, assigned_to, status, purchase_date, notes] = assetFromBody(req.body);
+  if (serialTaken(serial_number, id)) {
+    return res.status(409).json({ error: `Serial number "${serial_number}" is already in use.` });
+  }
+
   run(
     `UPDATE assets
      SET name=?, category=?, company=?, serial_number=?, assigned_to=?, status=?, purchase_date=?, notes=?
@@ -183,6 +231,8 @@ router.put("/:id", (req, res) => {
   }
 
   const updated = queryOne("SELECT * FROM assets WHERE id = ?", [id]);
+  const changes = diffFields(existing, updated);
+  if (Object.keys(changes).length) recordHistory(id, "update", changes);
   res.json(updated);
 
   syncRepairIssue(updated); // best-effort; no-op unless status is "In Repair"
@@ -192,12 +242,31 @@ router.put("/:id", (req, res) => {
 
 router.delete("/:id", (req, res) => {
   const id = Number(req.params.id);
-  if (!queryOne("SELECT id FROM assets WHERE id = ?", [id])) {
+  const existing = queryOne("SELECT * FROM assets WHERE id = ?", [id]);
+  if (!existing) {
     return res.status(404).json({ error: "Asset not found." });
   }
 
   run("DELETE FROM assets WHERE id = ?", [id]);
+  recordHistory(id, "delete", snapshot(existing)); // history is append-only and outlives the asset
   res.json({ success: true, id });
+});
+
+// ─── GET /assets/:id/history ───────────────────────────────────────────────────
+// Audit trail for one asset, newest first. Survives deletion of the asset itself.
+
+router.get("/:id/history", (req, res) => {
+  const id = Number(req.params.id);
+  const rows = queryAll(
+    "SELECT id, action, changes, at FROM asset_history WHERE asset_id = ? ORDER BY id DESC",
+    [id]
+  );
+  res.json(rows.map(r => ({
+    id: r.id,
+    action: r.action,
+    at: r.at,
+    changes: r.changes ? JSON.parse(r.changes) : {},
+  })));
 });
 
 module.exports = router;

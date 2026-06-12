@@ -9,6 +9,16 @@
  * CRLF or LF line endings. Output uses CRLF, which Excel and Sheets expect.
  */
 
+/**
+ * Neutralise CSV formula injection: a cell beginning with =, +, -, @, or a
+ * tab/CR is prefixed with a single quote so spreadsheet apps treat it as text
+ * rather than executing it as a formula. Applied to data cells on export.
+ */
+function neutralizeFormula(value) {
+  const s = value == null ? "" : String(value);
+  return /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+}
+
 /** Wrap a field in quotes only if it contains a comma, quote, CR or LF. */
 function quoteField(value) {
   const s = value == null ? "" : String(value);
@@ -22,7 +32,7 @@ function quoteField(value) {
  */
 function toCsv(rows, columns) {
   const header = columns.map(quoteField).join(",");
-  const body = rows.map(row => columns.map(c => quoteField(row[c])).join(",")).join("\r\n");
+  const body = rows.map(row => columns.map(c => quoteField(neutralizeFormula(row[c]))).join(",")).join("\r\n");
   return body ? `${header}\r\n${body}\r\n` : `${header}\r\n`;
 }
 

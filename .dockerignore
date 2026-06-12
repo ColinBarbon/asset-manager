@@ -1,0 +1,10 @@
+node_modules
+.git
+.github
+assets.db
+assets.db.tmp
+.env
+.env.*
+!.env.example
+test
+*.md
