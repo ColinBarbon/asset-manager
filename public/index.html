@@ -346,6 +346,7 @@
       <button class="btn-io" onclick="document.getElementById('import-file').click()">Import CSV</button>
     </div>
     <input type="file" id="import-file" accept=".csv,text/csv" style="display:none" onchange="importCsv(event)" />
+    <button class="btn-io" id="logout-btn" style="display:none; width:100%; margin-top:8px;" onclick="logout()">Sign out</button>
   </div>
 </aside>
 
@@ -479,6 +480,12 @@
         <label>Repair Tickets</label>
         <div id="f-repair-tickets" class="readonly-field"></div>
       </div>
+
+      <!-- Change history (read-only; populated when editing an existing asset) -->
+      <div class="field" id="f-history-wrap" style="display:none">
+        <label>Change History</label>
+        <div id="f-history" class="readonly-field" style="max-height:140px; overflow:auto;"></div>
+      </div>
     </div>
 
     <div class="modal-footer">
@@ -501,7 +508,11 @@
 
   // ── Boot ───────────────────────────────────────────────
   (async function boot() {
-    try { jiraBaseUrl = (await api("GET", "/config")).jiraBaseUrl || ""; } catch { /* links stay as plain text */ }
+    try {
+      const cfg = await api("GET", "/config");
+      jiraBaseUrl = cfg.jiraBaseUrl || "";
+      if (cfg.authEnabled) document.getElementById("logout-btn").style.display = "";
+    } catch { /* links stay as plain text */ }
     fetchAssets();
   })();
 
@@ -511,9 +522,15 @@
     const opts = { method, headers: { "Content-Type": "application/json" } };
     if (body) opts.body = JSON.stringify(body);
     const res  = await fetch(path, opts);
+    if (res.status === 401) { window.location = "/login"; throw { error: "Not signed in." }; }
     const data = await res.json();
     if (!res.ok) throw data;
     return data;
+  }
+
+  async function logout() {
+    try { await fetch("/logout", { method: "POST" }); } catch { /* ignore */ }
+    window.location = "/login";
   }
 
   async function fetchAssets() {
@@ -665,6 +682,7 @@
     document.getElementById("modal-subtitle").textContent = "";
     clearForm();
     document.getElementById("f-repair-tickets-wrap").style.display = "none"; // new assets have no tickets
+    document.getElementById("f-history-wrap").style.display = "none";        // …and no history
     showOverlay();
   }
 
@@ -676,7 +694,37 @@
     document.getElementById("modal-subtitle").textContent = `ID #${id}`;
     populateForm(a);
     renderRepairTickets(a);
+    renderHistory(id);
     showOverlay();
+  }
+
+  // Load and render the asset's audit trail (newest first). Hidden if empty.
+  async function renderHistory(id) {
+    const wrap = document.getElementById("f-history-wrap");
+    const box  = document.getElementById("f-history");
+    wrap.style.display = "none";
+    box.innerHTML = "";
+    try {
+      const entries = await api("GET", `/assets/${id}/history`);
+      if (!entries.length) return;
+      box.innerHTML = entries.map(e => {
+        const when = esc((e.at || "").replace("T", " ").replace("Z", ""));
+        let detail = "";
+        if (e.action === "update") {
+          detail = Object.entries(e.changes)
+            .map(([f, c]) => `${esc(f)}: ${esc(c.from || "∅")} → ${esc(c.to || "∅")}`)
+            .join("; ");
+        } else if (e.changes && e.changes.name) {
+          detail = esc(e.changes.name);
+        }
+        return `<div style="padding:3px 0;border-bottom:1px solid var(--border)">`
+             + `<span style="color:var(--accent);font-weight:600">${esc(e.action)}</span> `
+             + `<span style="color:var(--text-dim);font-size:10px">${when}</span>`
+             + (detail ? `<div style="color:var(--text-dim);font-size:11px">${detail}</div>` : "")
+             + `</div>`;
+      }).join("");
+      wrap.style.display = "flex";
+    } catch { /* history is non-critical */ }
   }
 
   function showOverlay() {

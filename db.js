@@ -18,7 +18,7 @@ const initSqlJs = require("sql.js");
 const fs        = require("fs");
 const path      = require("path");
 
-const DB_PATH = path.join(__dirname, "assets.db");
+const DB_PATH = process.env.DB_PATH || path.join(__dirname, "assets.db");
 
 let db; // holds the sql.js Database instance once initialised
 
@@ -83,12 +83,29 @@ function runInsert(sql, params = []) {
   return id;
 }
 
+/**
+ * Append an audit-trail entry. `changes` is any JSON-serialisable value
+ * (a field diff for updates, a snapshot for create/delete).
+ */
+function recordHistory(assetId, action, changes = {}) {
+  run(
+    "INSERT INTO asset_history (asset_id, action, changes) VALUES (?, ?, ?)",
+    [assetId, action, JSON.stringify(changes)]
+  );
+}
+
 // ─── Internal helpers ─────────────────────────────────────────────────────────
 
-/** Write the in-memory database out to disk. */
+/**
+ * Write the in-memory database out to disk atomically: write to a temp file,
+ * then rename over the target. rename() is atomic on the same filesystem, so a
+ * crash mid-write can't leave a half-written, corrupt assets.db.
+ */
 function persist() {
   const data = db.export();
-  fs.writeFileSync(DB_PATH, Buffer.from(data));
+  const tmp = `${DB_PATH}.tmp`;
+  fs.writeFileSync(tmp, Buffer.from(data));
+  fs.renameSync(tmp, DB_PATH);
 }
 
 /** Create the assets table if it doesn't already exist. */
@@ -105,6 +122,17 @@ function createSchema() {
       purchase_date TEXT    NOT NULL DEFAULT '',
       notes         TEXT    NOT NULL DEFAULT '',
       created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+
+  // Append-only audit trail: one row per create / update / delete / import.
+  db.run(`
+    CREATE TABLE IF NOT EXISTS asset_history (
+      id       INTEGER PRIMARY KEY AUTOINCREMENT,
+      asset_id INTEGER NOT NULL,
+      action   TEXT    NOT NULL,
+      changes  TEXT    NOT NULL DEFAULT '',          -- JSON: field diffs or a snapshot
+      at       TEXT    NOT NULL DEFAULT (datetime('now'))
     )
   `);
 }
@@ -152,4 +180,4 @@ function seedIfEmpty() {
   console.log("  ✓ Seeded database with sample assets");
 }
 
-module.exports = { initDb, queryAll, queryOne, run, runInsert };
+module.exports = { initDb, queryAll, queryOne, run, runInsert, recordHistory };

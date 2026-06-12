@@ -9,14 +9,20 @@ A simple, clean web-based asset management tool.
 
 ```
 asset-manager/
-├── server.js          ← Express entry point — mounts routes and static files
-├── db.js              ← SQLite setup, schema creation, seed data
+├── server.js          ← Boot entry point — init DB, then listen
+├── app.js             ← Express app factory (middleware, routes, security headers)
+├── auth.js            ← Single shared-password auth (opt-in via APP_PASSWORD)
+├── db.js              ← SQLite setup, schema, seed data, audit-history helper
 ├── validation.js      ← Shared input validation
+├── csv.js             ← CSV serialise/parse (formula-injection safe on export)
 ├── jira.js            ← Optional Jira repair-issue sync (opt-in via env vars)
 ├── routes/
-│   └── assets.js      ← REST API: GET / POST / PUT / DELETE
+│   └── assets.js      ← REST API: GET / POST / PUT / DELETE + history
 ├── public/
-│   └── index.html     ← Full frontend (HTML + CSS + vanilla JS)
+│   ├── index.html     ← Full frontend (HTML + CSS + vanilla JS)
+│   └── login.html     ← Login page (shown when auth is enabled)
+├── test/              ← API + auth tests (node:test)
+├── Dockerfile
 ├── package.json
 └── assets.db          ← Created automatically on first run
 ```
@@ -54,6 +60,33 @@ http://localhost:3000
 npm run dev
 ```
 
+### Run the tests
+
+```bash
+npm test
+```
+
+---
+
+## Authentication
+
+The app supports a **single shared password**. It's **opt-in**: with no
+`APP_PASSWORD` set the app runs wide open (fine for a trusted local network);
+set one for any shared or internet-facing deployment.
+
+1. Copy `.env.example` to `.env` and set:
+   - `APP_PASSWORD` — the shared password.
+   - `SESSION_SECRET` — a long random string used to sign session cookies
+     (generate one with
+     `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`).
+     If omitted, a random secret is generated at boot and all sessions reset on
+     every restart.
+   - `SESSION_TTL_HOURS` — optional, how long a login lasts (default 168 = 7 days).
+2. `npm start`. Visitors are redirected to `/login` until they enter the
+   password; the session is kept in an `HttpOnly`, `SameSite=Strict` cookie.
+
+`GET /health` stays public so load balancers can probe it without a session.
+
 ---
 
 ## API Reference
@@ -65,9 +98,18 @@ npm run dev
 | POST   | `/assets`     | Create a new asset                                   |
 | PUT    | `/assets/:id` | Update an existing asset                             |
 | DELETE | `/assets/:id` | Delete an asset                                      |
+| GET    | `/assets/:id/history` | Audit trail for one asset (newest first)     |
 | GET    | `/assets/export.csv` | Download all assets as a CSV file             |
 | POST   | `/assets/import` | Import assets from CSV (append mode)             |
-| GET    | `/config`     | Frontend config (Jira base URL for ticket deep-links) |
+| GET    | `/config`     | Frontend config (Jira base URL, auth state)          |
+| GET    | `/health`     | Health check (public, no auth)                       |
+| POST   | `/login`      | Exchange the shared password for a session cookie    |
+| POST   | `/logout`     | Clear the session cookie                             |
+
+Creating or updating an asset with a `serial_number` that another asset already
+uses returns **409 Conflict** (empty serials are allowed and never conflict).
+Every create / update / delete / import is recorded in an append-only audit
+trail, viewable per asset via `/assets/:id/history` and in the edit dialog.
 
 ### Query Parameters (GET)
 
@@ -82,14 +124,14 @@ Both can be combined: `GET /assets?search=laptop&status=Available`
 
 | Field           | Required | Type   | Valid Values                                        |
 |-----------------|----------|--------|-----------------------------------------------------|
-| `name`          | ✓        | string | Any non-empty string                                |
-| `category`      | ✓        | string | Laptop, Monitor, Phone, Tablet, Printer, Server, Keyboard, Mouse, Other |
+| `name`          | ✓        | string | Non-empty, ≤ 200 chars                              |
+| `category`      | ✓        | string | Laptop, Desktop, Monitor, Phone, Tablet, Printer, Server, Keyboard, Mouse, Other |
 | `status`        | ✓        | string | Available, Assigned, In Repair, Ordered, Pending Approval, Retired |
-| `company`       |          | string | Free text (Apple, Dell, HP, …)                     |
-| `serial_number` |          | string | Free text                                           |
-| `assigned_to`   |          | string | Employee name                                       |
-| `purchase_date` |          | string | YYYY-MM-DD                                          |
-| `notes`         |          | string | Free text                                           |
+| `company`       |          | string | Free text, ≤ 200 chars                             |
+| `serial_number` |          | string | Free text, ≤ 100 chars; must be unique if set      |
+| `assigned_to`   |          | string | Employee name, ≤ 200 chars                          |
+| `purchase_date` |          | string | YYYY-MM-DD (validated as a real calendar date)      |
+| `notes`         |          | string | Free text, ≤ 2000 chars                             |
 
 ### Example: Create an asset
 
